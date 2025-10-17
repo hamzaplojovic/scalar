@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { redirectToProxy } from '@scalar/oas-utils/helpers'
 import { dereferenceSync } from '@scalar/openapi-parser'
+import { createSidebarState } from '@scalar/sidebar'
 import {
   apiReferenceConfigurationSchema,
   type AnyApiReferenceConfiguration,
@@ -13,6 +14,10 @@ import {
   type UrlDoc,
 } from '@scalar/workspace-store/client'
 import { onCustomEvent } from '@scalar/workspace-store/events'
+import type {
+  TraversedEntry,
+  TraversedTag,
+} from '@scalar/workspace-store/schemas/navigation'
 import diff from 'microdiff'
 import {
   computed,
@@ -29,7 +34,6 @@ import DocumentSelector from '@/features/multiple-documents/DocumentSelector.vue
 import ApiReferenceToolbar from '@/features/toolbar/ApiReferenceToolbar.vue'
 import { NAV_STATE_SYMBOL } from '@/hooks/useNavState'
 import { downloadDocument } from '@/libs/download'
-import { useSidebar } from '@/v2/blocks/scalar-sidebar-block'
 import { mapConfigToClientStore } from '@/v2/helpers/map-config-to-client-store'
 import { mapConfigToWorkspaceStore } from '@/v2/helpers/map-config-to-workspace-store'
 import { mapConfiguration } from '@/v2/helpers/map-configuration'
@@ -63,6 +67,9 @@ if (typeof window !== 'undefined') {
 
 const root = useTemplateRef('root')
 
+onBeforeMount(() => {
+  console.log('onBeforeMount', window.location.hash)
+})
 // ---------------------------------------------------------------------------
 /**
  * Configuration Handling
@@ -117,16 +124,8 @@ const mergedConfig = computed<ApiReferenceConfigurationRaw>(() => ({
 // Initialized navigation state
 const isIntersectionEnabled = ref(false)
 const hash = ref('')
-const hashPrefix = ref('')
 
 // Provide the intersection observer which has defaults
-provide(NAV_STATE_SYMBOL, {
-  isIntersectionEnabled,
-  hash,
-  hashPrefix,
-  basePath: () => mergedConfig.value.pathRouting?.basePath,
-  generateHeadingSlug: () => mergedConfig.value.generateHeadingSlug,
-})
 
 const QUERY_PARAMETER = 'api'
 
@@ -160,7 +159,6 @@ function syncSlugAndUrlWithDocument(
   window.history.replaceState({}, '', url.toString())
 
   hash.value = ''
-  hashPrefix.value = ''
   isIntersectionEnabled.value = false
 
   // Update the active slug
@@ -186,10 +184,28 @@ const { toggleColorMode, isDarkMode } = useColorMode({
   overrideColorMode: mergedConfig.value.forceDarkModeState,
 })
 
-/** Initialize the sidebar
- * @todo Remove hook and do custom events for actions
+/**
+ * Create top level sidebar entries for each document
+ * This allows sharing a single sidebar state for across the workspace
  */
-const { setCollapsedSidebarItem } = useSidebar(workspaceStore)
+const sidebarItems = computed<TraversedEntry[]>(() => {
+  return Object.entries(workspaceStore.workspace.documents).map(
+    ([slug, document]) => ({
+      id: slug,
+      type: 'tag',
+      isGroup: true,
+      description: document.info.description,
+      name: document.info.title ?? slug,
+      title: document.info.title ?? slug,
+      children: document?.['x-scalar-navigation'] ?? [],
+    }),
+  )
+})
+
+/** Initialize the sidebar */
+const sidebarState = createSidebarState<TraversedEntry>(sidebarItems, {
+  hooks: {},
+})
 
 /** Set up event listeners for client store events */
 useWorkspaceStoreEvents(workspaceStore, root)
@@ -333,9 +349,9 @@ watch(
       }
     }
 
-    newConfigList.forEach((newConfig, index) => {
-      updateSource(newConfig, oldConfigList[index])
-    })
+    newConfigList.forEach((newConfig, index) =>
+      updateSource(newConfig, oldConfigList[index]),
+    )
 
     const newSlugs = newConfigList.map((c) => c.slug)
     const oldSlugs = oldConfigList.map((c) => c.slug)
@@ -345,7 +361,7 @@ watch(
       newSlugs.length !== oldSlugs.length ||
       !newSlugs.every((slug, index) => slug === oldSlugs[index])
     ) {
-      changeSelectedDocument(newSlugs[0])
+      await changeSelectedDocument(newSlugs[0])
     }
   },
   {
@@ -398,8 +414,8 @@ onCustomEvent(root, 'scalar-open-client', () => {
 
 /** Set the sidebar item to open and run any config handlers */
 onCustomEvent(root, 'scalar-on-show-more', (event) => {
-  setCollapsedSidebarItem(event.detail.id, true)
   mergedConfig.value.onShowMore?.(event.detail.id)
+  return sidebarState.setExpanded(event.detail.id, true)
 })
 
 onCustomEvent(root, 'scalar-update-selected-server', (event) => {
@@ -463,8 +479,11 @@ const isDevelopment = import.meta.env.DEV
       :configuration="mergedConfig"
       :document="workspaceStore.workspace.activeDocument"
       :getSecuritySchemes="getSecuritySchemes"
+      :hash="hash"
       :isDark="!!workspaceStore.workspace['x-scalar-dark-mode']"
       :isDevelopment="isDevelopment"
+      :sidebarState="() => sidebarState"
+      :slug="activeSlug"
       :url="configList[activeSlug]?.source?.url"
       :xScalarDefaultClient="
         workspaceStore.workspace['x-scalar-default-client']

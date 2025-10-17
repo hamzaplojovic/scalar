@@ -1,9 +1,9 @@
 import { freezeAtTop } from '@scalar/helpers/dom/freeze-at-top'
 import { ref } from 'vue'
 
-import { lazyBus } from '@/components/Lazy'
-import { hasLazyLoaded } from '@/components/Lazy/lazyBus'
 import { useNavState } from '@/hooks/useNavState'
+
+import { hasLazyLoaded, lazyBus } from './lazyBus'
 
 const CHECK_INTERVAL = 25
 const CHECK_TIMEOUT = 500

@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { type MaybeRefOrGetter, computed, ref, toValue } from 'vue'
 
 import { generateReverseIndex } from './generate-reverse-index'
 
@@ -68,9 +68,12 @@ type SidebarStateOptions = Partial<{
  * await sidebarState.setExpanded('child2', true)
  * ```
  */
-export const createSidebarState = <T extends { id: string }>(items: T[], options?: SidebarStateOptions) => {
+export const createSidebarState = <T extends { id: string }>(
+  items: MaybeRefOrGetter<T[]>,
+  options?: SidebarStateOptions,
+) => {
   // Reverse index for quick lookup of items and their parents
-  const index = generateReverseIndex(items, options?.key ?? 'children')
+  const index = computed(() => generateReverseIndex(toValue(items), options?.key ?? 'children'))
   // Reactive record of selected item ids
   const selectedItems = ref<Record<string, boolean>>({})
   // Reactive record of expanded item ids
@@ -112,7 +115,7 @@ export const createSidebarState = <T extends { id: string }>(items: T[], options
     selectedItems.value = {}
 
     // Mark the selected item and all its parents as selected
-    markSelected(index.get(id))
+    markSelected(index.value.get(id))
 
     // Call onAfterSelect hook if provided
     if (options?.hooks?.onAfterSelect) {
@@ -162,7 +165,7 @@ export const createSidebarState = <T extends { id: string }>(items: T[], options
       expandedItems.value[id] = false
     } else {
       // When expanding, ensure all parents are expanded as well
-      openParents(index.get(id))
+      openParents(index.value.get(id))
     }
 
     // Call onAfterExpand hook if provided
@@ -171,13 +174,26 @@ export const createSidebarState = <T extends { id: string }>(items: T[], options
     }
   }
 
+  const isExpanded = (id: string) => {
+    return expandedItems.value[id] ?? false
+  }
+
+  const isSelected = (id: string) => {
+    return selectedItems.value[id] ?? false
+  }
+
+  const getEntryById = (id: string) => index.value.get(id)
+
   return {
-    items,
+    items: computed(() => toValue(items)),
     index,
     selectedItems,
     expandedItems,
     setSelected,
     setExpanded,
+    isExpanded,
+    isSelected,
+    getEntryById,
   }
 }
 

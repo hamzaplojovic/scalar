@@ -6,8 +6,6 @@ import { type InjectionKey, type MaybeRefOrGetter, type Ref, inject, ref, toValu
 export type NavState = {
   /** The URL hash without the #, also the "hash" pulled from pathRouting */
   hash: Ref<string>
-  /** The prefix for the hash, used in ORG */
-  hashPrefix: Ref<string>
   /** Whether the intersection observer is enabled and updating the hash as we scroll */
   isIntersectionEnabled: Ref<boolean>
   basePath: MaybeRefOrGetter<string | undefined>
@@ -18,7 +16,6 @@ export const NAV_STATE_SYMBOL = Symbol() as InjectionKey<NavState>
 /** We inject a backup global refs in case one isn't provided for any integrations not using ApiReference */
 const isIntersectionEnabledBackup = ref(false)
 const hashBackup = ref('')
-const hashPrefixBackup = ref('')
 
 /**
  * Hook which provides reactive hash state from the URL
@@ -29,10 +26,9 @@ const hashPrefixBackup = ref('')
  *
  */
 export const useNavState = () => {
-  const { isIntersectionEnabled, hash, hashPrefix, basePath, generateHeadingSlug } = inject(NAV_STATE_SYMBOL, {
+  const { isIntersectionEnabled, hash, basePath, generateHeadingSlug } = inject(NAV_STATE_SYMBOL, {
     isIntersectionEnabled: isIntersectionEnabledBackup,
     hash: hashBackup,
-    hashPrefix: hashPrefixBackup,
     basePath: undefined,
     generateHeadingSlug: undefined,
   })
@@ -55,7 +51,7 @@ export const useNavState = () => {
     toValue(basePath)
       ? getPathRoutingId(window.location.pathname)
       : // Must remove the prefix from the hash as the internal hash value should be pure
-        decodeURIComponent(window.location.hash.replace(/^#/, '')).slice(hashPrefix.value.length)
+        decodeURIComponent(window.location.hash.replace(/^#/, ''))
 
   // Update the reactive hash state
   const updateHash = () => (hash.value = getReferenceId())
@@ -68,7 +64,7 @@ export const useNavState = () => {
     if (typeof base === 'string') {
       newUrl.pathname = combineUrlAndPath(base, replacementHash)
     } else {
-      newUrl.hash = hashPrefix.value + replacementHash
+      newUrl.hash = replacementHash
     }
 
     // Update the hash ref
@@ -89,14 +85,10 @@ export const useNavState = () => {
     }
     // Hash routing
     else {
-      newUrl.hash = hashPrefix.value + replacementHash
+      newUrl.hash = replacementHash
     }
     newUrl.search = search
     return newUrl.toString()
-  }
-
-  const getFullHash = (hashTarget: string = hash.value) => {
-    return `${hashPrefix.value}${hashTarget}`
   }
 
   /**
@@ -117,16 +109,6 @@ export const useNavState = () => {
 
   return {
     hash,
-    /** Sets the prefix for the hash */
-    setHashPrefix: (prefix: string) => {
-      hashPrefix.value = prefix
-    },
-    /**
-     * Gets the full hash with the prefix
-     * @param hashTarget The hash to target with the return
-     * @returns The full hash
-     */
-    getFullHash,
     /**
      * Gets the hashed url with the prefix
      * @param replacementHash The hash to replace the current hash with

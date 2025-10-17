@@ -9,16 +9,27 @@ import {
   SectionHeaderTag,
 } from '@/components/Section'
 
-defineProps<{
+const { tag, isCollapsed } = defineProps<{
   tag: TraversedTag
+  isCollapsed: boolean
+}>()
+
+const emit = defineEmits<{
+  (e: 'toggleTag', id: string, open: boolean): void
+  (e: 'copyAnchorUrl', id: string): void
 }>()
 </script>
 
 <template>
-  <SectionContainerAccordion class="tag-section">
+  <SectionContainerAccordion
+    class="tag-section"
+    :modelValue="!isCollapsed"
+    @update:modelValue="(value) => emit('toggleTag', tag.id, value)">
     <template #title>
       <SectionHeader class="tag-name">
-        <Anchor :id="tag.id">
+        <Anchor
+          :id="tag.id"
+          @copyAnchorUrl="(id) => emit('copyAnchorUrl', id)">
           <SectionHeaderTag :level="2">
             {{ tag.title }}
           </SectionHeaderTag>

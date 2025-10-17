@@ -21,15 +21,24 @@ const { tag, headerId, isCollapsed } = defineProps<{
   isCollapsed?: boolean
   isLoading?: boolean
 }>()
+
+const emit = defineEmits<{
+  (e: 'scrollToId', id: string): void
+  (e: 'copyAnchorUrl', id: string): void
+  (e: 'intersecting', id: string): void
+}>()
 </script>
 <template>
   <Section
     v-if="tag"
     :id="tag.id"
     :label="tag.title?.toUpperCase()"
-    role="none">
+    role="none"
+    @intersecting="(id) => emit('intersecting', id)">
     <SectionHeader v-show="!isLoading">
-      <Anchor :id="tag.id">
+      <Anchor
+        :id="tag.id"
+        @copyAnchorUrl="(id) => emit('copyAnchorUrl', id)">
         <SectionHeaderTag
           :id="headerId"
           :level="2">
@@ -47,7 +56,9 @@ const { tag, headerId, isCollapsed } = defineProps<{
             withImages />
         </SectionColumn>
         <SectionColumn>
-          <OperationsList :tag="tag" />
+          <OperationsList
+            :tag="tag"
+            @scrollToId="(id) => emit('scrollToId', id)" />
         </SectionColumn>
       </SectionColumns>
     </SectionContent>

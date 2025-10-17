@@ -15,13 +15,14 @@ import {
   ScalarIconTextAlignLeft,
 } from '@scalar/icons'
 import type { ScalarIconComponent } from '@scalar/icons/types'
+import type { TraversedEntry } from '@scalar/workspace-store/schemas/navigation'
 import type { OpenApiDocument } from '@scalar/workspace-store/schemas/v3.1/strict/openapi-document'
 import type { FuseResult } from 'fuse.js'
 import { nanoid } from 'nanoid'
 import { ref, watch } from 'vue'
 
+import { HttpMethod } from '@/components/HttpMethod'
 import { lazyBus } from '@/components/Lazy'
-import { SidebarHttpBadge, useSidebar } from '@/v2/blocks/scalar-sidebar-block'
 
 import { useSearchIndex } from '../hooks/useSearchIndex'
 import type { EntryType, FuseData } from '../types'
@@ -29,6 +30,11 @@ import type { EntryType, FuseData } from '../types'
 const props = defineProps<{
   modalState: ModalState
   document?: OpenApiDocument
+  items: TraversedEntry[]
+}>()
+
+const emit = defineEmits<{
+  (e: 'toggleSidebarItem', id: string, open?: boolean): void
 }>()
 
 /** Base id for the search form */
@@ -40,15 +46,13 @@ const instructionsId = `${id}-search-instructions`
 /** Constructs and unique id for a given option */
 const getOptionId = (href: string) => `${id}${href}`
 
-const { items } = useSidebar()
-
 const {
   resetSearch,
   selectedIndex,
   selectedSearchResult,
   searchResultsWithPlaceholderResults,
   query,
-} = useSearchIndex(items, props.document)
+} = useSearchIndex(props.items, props.document)
 
 const ENTRY_ICONS: { [x in EntryType]: ScalarIconComponent } = {
   heading: ScalarIconTextAlignLeft,
@@ -77,8 +81,6 @@ watch(
   },
 )
 
-const { setCollapsedSidebarItem } = useSidebar()
-
 // TODO: Does this work with custom slugs?
 const tagRegex = /#(tag\/[^/]*)/
 
@@ -92,7 +94,7 @@ function onSearchResultClick(result: FuseResult<FuseData>) {
     parentId = tagMatch[1]
   }
   // Expand the corresponding sidebar item
-  setCollapsedSidebarItem(parentId, true)
+  emit('toggleSidebarItem', parentId, true)
 
   // Extract the target ID from the href
   const targetId = result.item.href.replace('#', '')
@@ -236,7 +238,7 @@ function onSearchResultEnter() {
           #description>
           <span class="inline-flex items-center gap-1">
             <template v-if="result.item.type === 'operation'">
-              <SidebarHttpBadge
+              <HttpMethod
                 aria-hidden="true"
                 :method="result.item.method ?? 'get'" />
               <span class="sr-only">

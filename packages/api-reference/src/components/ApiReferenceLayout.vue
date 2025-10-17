@@ -6,11 +6,13 @@ import {
   addScalarClassesToHeadless,
   ScalarColorModeToggleButton,
   ScalarColorModeToggleIcon,
-  ScalarErrorBoundary,
   ScalarSidebarFooter,
 } from '@scalar/components'
+import { scrollToId } from '@scalar/helpers/dom/scroll-to-id'
 import { sleep } from '@scalar/helpers/testing/sleep'
 import type { Server } from '@scalar/oas-utils/entities/spec'
+import { combineUrlAndPath } from '@scalar/oas-utils/helpers'
+import { ScalarSidebar, type SidebarState } from '@scalar/sidebar'
 import {
   getThemeStyles,
   hasObtrusiveScrollbars,
@@ -18,7 +20,12 @@ import {
 } from '@scalar/themes'
 import type { ApiReferenceConfigurationRaw } from '@scalar/types'
 import { useBreakpoints } from '@scalar/use-hooks/useBreakpoints'
+import { useClipboard } from '@scalar/use-hooks/useClipboard'
 import { ScalarToasts } from '@scalar/use-toasts'
+import type {
+  TraversedEntry,
+  TraversedTag,
+} from '@scalar/workspace-store/schemas/navigation'
 import type {
   Workspace,
   WorkspaceDocument,
@@ -26,6 +33,7 @@ import type {
 import { useDebounceFn, useResizeObserver } from '@vueuse/core'
 import {
   computed,
+  nextTick,
   onBeforeMount,
   onMounted,
   onUnmounted,
@@ -33,24 +41,33 @@ import {
   ref,
   useId,
   watch,
+  watchEffect,
 } from 'vue'
 
 import ClassicHeader from '@/components/ClassicHeader.vue'
 import { Content } from '@/components/Content'
 import GettingStarted from '@/components/GettingStarted.vue'
-import { hasLazyLoaded } from '@/components/Lazy/lazyBus'
+import { hasLazyLoaded, lazyBus } from '@/components/Lazy/lazyBus'
+import { useFreezing } from '@/components/Lazy/useFreezing'
 import MobileHeader from '@/components/MobileHeader.vue'
 import { SearchButton } from '@/features/Search'
-import { useNavState } from '@/hooks/useNavState'
 import { createPluginManager, PLUGIN_MANAGER_SYMBOL } from '@/plugins'
 import type { ReferenceLayoutSlot, ReferenceSlotProps } from '@/types'
-import { SidebarBlock, useSidebar } from '@/v2/blocks/scalar-sidebar-block'
 import type { SecuritySchemeGetter } from '@/v2/helpers/map-config-to-client-store'
 
 // ---------------------------------------------------------------------------
 // Vue Macros
 
-const { configuration, document, isDark } = defineProps<{
+const {
+  slug,
+  configuration,
+  document,
+  isDark,
+  sidebarState: _sidebarState,
+  hash,
+} = defineProps<{
+  hash: string
+  slug: string
   configuration: ApiReferenceConfigurationRaw
   document: WorkspaceDocument | undefined
   activeServer: Server | undefined
@@ -59,6 +76,7 @@ const { configuration, document, isDark } = defineProps<{
   isDark: boolean
   isDevelopment: boolean
   url?: string
+  sidebarState: () => SidebarState<TraversedEntry>
 }>()
 
 defineEmits<{
@@ -79,6 +97,124 @@ defineSlots<
   } & { 'document-selector': never } & { 'client-modal': never }
 >()
 
+const sidebarState = _sidebarState()
+
+/** We get the sub items for the sidebar based on the configuration/document slug */
+const sidebarItems = computed<TraversedEntry[]>(
+  () =>
+    sidebarState.items.value.find(
+      (item): item is TraversedTag => item.id === slug,
+    )?.children ?? [],
+)
+
+const isSidebarOpen = ref(false)
+
+const scrollTo = (id: string) => {
+  const element = window.document.getElementById(id)
+  console.log('scrollTo', id, element)
+  if (element) {
+    element.scrollIntoView({
+      block: 'start',
+    })
+  }
+}
+
+/**
+ * Find the sidebar entry that represents the introduction section
+ */
+const infoSectionId = computed(
+  () =>
+    sidebarItems.value.find(
+      (item) => item.type === 'text' && item.title === 'Introduction',
+    )?.id,
+)
+
+/**
+ * Scroll to operation
+ *
+ * Similar to scrollToId BUT in the case of a section not being open,
+ * it uses the lazyBus to ensure the section is open before scrolling to it
+ */
+const scrollToOperation = (operationId: string, focus?: boolean) => {
+  const sectionId = sidebarState.getEntryById(operationId)?.parent?.id
+
+  if (sectionId && sectionId !== operationId) {
+    // We use the lazyBus to check when the target has loaded then scroll to it
+    if (!sidebarState.isExpanded(sectionId)) {
+      const unsubscribe = lazyBus.on((ev) => {
+        if (ev.loaded === operationId) {
+          scrollTo(operationId)
+          unsubscribe()
+        }
+      })
+      sidebarState.setExpanded(sectionId, true)
+    } else {
+      scrollTo(operationId)
+    }
+  }
+}
+
+/**
+ * Depending on the item type we handle a selection event differently:
+ *
+ * - Tag: If a tag is closed we open it and all its parents and scroll to it
+ *        If a tag is open we just close the tag
+ * - Operation:
+ *        Open all parents and scroll to the operation
+ */
+const handleSelectItem = async (id: string) => {
+  const item = sidebarState.getEntryById(id)
+  console.log('handleSelectItem', id, item)
+
+  /** Recursively open all parents of the given item */
+  function openParents(currentId: string) {
+    const parent = sidebarState.getEntryById(currentId)?.parent
+    if (parent) {
+      sidebarState.setExpanded(parent.id, true)
+      openParents(parent.id)
+    }
+  }
+
+  if (item?.type === 'tag') {
+    const isOpen = sidebarState.isExpanded(id)
+    if (isOpen) {
+      sidebarState.setExpanded(id, false)
+    } else {
+      console.log('openParents', id)
+      sidebarState.setExpanded(id, true)
+      openParents(id)
+      await nextTick()
+      scrollTo(id)
+    }
+  }
+
+  if (
+    item?.type === 'operation' ||
+    item?.type === 'webhook' ||
+    item?.type === 'model' ||
+    item?.type === 'example' ||
+    item?.type === 'text'
+  ) {
+    sidebarState.setExpanded(id, true)
+    openParents(id)
+    scrollToOperation(id)
+  }
+}
+
+const handleToggleTag = (id: string, open: boolean) => {
+  sidebarState.setExpanded(id, open)
+  console.log('handleToggleTag', id, open, sidebarState.isExpanded(id))
+}
+
+const handleToggleSchema = (id: string, open: boolean) => {
+  sidebarState.setExpanded(id, open)
+  console.log('handleToggleSchema', id, open, sidebarState.isExpanded(id))
+}
+
+const handleToggleOperation = (id: string, open: boolean) => {
+  sidebarState.setExpanded(id, open)
+  console.log('handleToggleOperation', id, open, sidebarState.isExpanded(id))
+}
 // ---------------------------------------------------------------------------
 // Date injection for global state
 
@@ -89,6 +225,7 @@ defineSlots<
  * @see https://github.com/tailwindlabs/headlessui/issues/2979
  */
 provideUseId(() => useId())
+
 // Provide the client layout
 provide(LAYOUT_SYMBOL, 'modal')
 
@@ -102,25 +239,12 @@ provide(
 // ---------------------------------------------------------------------------
 // Sync sidebar to active document
 
-const { isSidebarOpen, setCollapsedSidebarItem, scrollToOperation, items } =
-  useSidebar()
+// const { isSidebarOpen, setCollapsedSidebarItem, scrollToOperation, items } =
 
-/** Id of the first entry should be the  */
-const contentId = computed(() => items.value.entries[0]?.id ?? '')
-
-const {
-  getReferenceId,
-  getPathRoutingId,
-  hash,
-  isIntersectionEnabled,
-  updateHash,
-  replaceUrlState,
-} = useNavState()
+// useFreezing()
 
 /** This is passed into all of the slots so they have access to the references data */
-const breadcrumb = computed(
-  () => items.value.entities?.get(hash.value)?.title ?? '',
-)
+const breadcrumb = computed(() => sidebarState.getEntryById(hash)?.title ?? '')
 
 const referenceSlotProps = computed<ReferenceSlotProps>(() => ({
   breadcrumb: breadcrumb.value,
@@ -129,11 +253,39 @@ const referenceSlotProps = computed<ReferenceSlotProps>(() => ({
 // Check for Obtrusive Scrollbars
 const obtrusiveScrollbars = computed(hasObtrusiveScrollbars)
 
+const { copyToClipboard } = useClipboard()
+
+const getHashedUrl = (
+  replacementHash: string,
+  url = window.location.href,
+  search = window.location.search,
+) => {
+  const newUrl = new URL(url)
+
+  const base = configuration.pathRouting?.basePath
+  // Path routing
+  if (typeof base === 'string') {
+    newUrl.pathname = combineUrlAndPath(base, replacementHash)
+  }
+  // Hash routing
+  else {
+    newUrl.hash = replacementHash
+  }
+  newUrl.search = search
+  return newUrl.toString()
+}
+
+/** Ensure we copy the hash OR path if pathRouting is enabled */
+const handleCopyAnchorUrl = (id: string) => {
+  console.log('handleCopyAnchorUrl', id)
+  return copyToClipboard(getHashedUrl(id))
+}
+
+const handleIntersecting = (id: string) => {
+  console.log('handleIntersecting', id)
+}
 // ---------------------------------------------------------------------------
 // Scroll management
-
-/** TODO: Comment this var */
-const yPosition = ref(0)
 
 // Front-end redirect
 if (configuration.redirect && typeof window !== 'undefined') {
@@ -148,96 +300,78 @@ if (configuration.redirect && typeof window !== 'undefined') {
 
 onBeforeMount(() => {
   // Ideally this triggers absolutely first on the client so we can set hash value
-  updateHash()
+  // updateHash()
 
   // Ensure we add our scalar wrapper class to the headless ui root, mounted is too late
   addScalarClassesToHeadless()
 })
 
 // Disables intersection observer and scrolls to section once it has been opened
-const scrollToSection = async (id?: string) => {
-  isIntersectionEnabled.value = false
-  updateHash()
+// const scrollToSection = async (id?: string) => {
+//   isIntersectionEnabled.value = false
+//   updateHash()
 
-  if (id) {
-    scrollToOperation(id)
-  } else {
-    documentEl.value?.scrollTo(0, 0)
-  }
+//   if (id) {
+//     scrollToOperation(id)
+//   } else {
+//     documentEl.value?.scrollTo(0, 0)
+//   }
 
-  await sleep(100)
-  isIntersectionEnabled.value = true
-}
+//   await sleep(100)
+//   isIntersectionEnabled.value = true
+// }
 
-onMounted(() => {
-  // Prevent the browser from restoring scroll position on refresh
-  history.scrollRestoration = 'manual'
+// onMounted(() => {
+//   // Prevent the browser from restoring scroll position on refresh
+//   history.scrollRestoration = 'manual'
 
-  // Find scalar Y offset to support users who have tried to add their own headers
-  const pbcr = documentEl.value?.parentElement?.getBoundingClientRect()
-  const bcr = documentEl.value?.getBoundingClientRect()
-  if (pbcr && bcr) {
-    const difference = bcr.top - pbcr.top
-    yPosition.value = difference < 2 ? 0 : difference
-  }
+//   // This is what updates the hash ref from hash changes
+//   window.onhashchange = () => scrollToSection(getReferenceId())
 
-  // This is what updates the hash ref from hash changes
-  window.onhashchange = () => {
-    scrollToSection(getReferenceId())
-  }
-  // Handle back for path routing
-  window.onpopstate = () =>
-    configuration.pathRouting &&
-    scrollToSection(getPathRoutingId(window.location.pathname))
+//   // Handle back for path routing
+//   window.onpopstate = () =>
+//     configuration.pathRouting &&
+//     scrollToSection(getPathRoutingId(window.location.pathname))
 
-  // Add window scroll listener
-  window.addEventListener('scroll', debouncedScroll, { passive: true })
-})
+//   // Add window scroll listener
+//   window.addEventListener('scroll', debouncedScroll, { passive: true })
+// })
 
-// To clear hash when scrolled to the top
-const debouncedScroll = useDebounceFn(() => {
-  if (window.scrollY < 50 && hasLazyLoaded.value) {
-    replaceUrlState('')
-  }
-})
+// // To clear hash when scrolled to the top
+// const debouncedScroll = useDebounceFn(() => {
+//   if (window.scrollY < 50 && hasLazyLoaded.value) {
+//     replaceUrlState('')
+//   }
+// })
 
-onUnmounted(() => {
-  // Remove window scroll listener
-  window.removeEventListener('scroll', debouncedScroll)
-})
+// onUnmounted(() => {
+//   // Remove window scroll listener
+//   window.removeEventListener('scroll', debouncedScroll)
+// })
 
 // Open a sidebar tag
-watch(
-  () => document,
-  () => {
-    // Scroll to given hash
-    if (hash.value) {
-      const entry = items.value.entities.get(hash.value)
-      const hashSectionId = entry?.parent?.id ?? entry?.id
-      if (hashSectionId) {
-        setCollapsedSidebarItem(hashSectionId, true)
-      }
-    }
-    // Open the first tag if no hash is present
-    else {
-      const firstTag = items.value.entries.find((item) => item.type === 'tag')
-      if (firstTag) {
-        setCollapsedSidebarItem(firstTag.id, true)
-      }
-    }
-  },
-)
+// watch(
+//   () => document,
+//   () => {
+//     // Scroll to given hash
+//     if (hash.value) {
+//       const entry = sidebarState.getEntryById(hash.value)
+//       const hashSectionId = entry?.parent?.id ?? entry?.id
+//       if (hashSectionId) {
+//         sidebarState.setExpanded(hashSectionId, true)
+//       }
+//     }
+//     // Open the first tag if no hash is present
+//     else {
+//       const firstTag = sidebarItems.value.find((item) => item.type === 'tag')
+//       if (firstTag) {
+//         sidebarState.setExpanded(firstTag.id, true)
+//       }
+//     }
+//   },
+// )
 
 // ---------------------------------------------------------------------------
-
-// Track the container height to control the sidebar height
-const elementHeight = ref('100dvh')
-const documentEl = ref<HTMLElement | null>(null)
-useResizeObserver(documentEl, (entries) => {
-  elementHeight.value = entries[0]
-    ? entries[0].contentRect.height + 'px'
-    : '100dvh'
-})
 
 const themeStyleTag = computed(
   () => `<style>
@@ -258,11 +392,14 @@ watch(mediaQueries.lg, (newValue, oldValue) => {
   }
 })
 
-watch(hash, (newHash, oldHash) => {
-  if (newHash && newHash !== oldHash) {
-    isSidebarOpen.value = false
-  }
-})
+watch(
+  () => hash,
+  (newHash, oldHash) => {
+    if (newHash && newHash !== oldHash) {
+      isSidebarOpen.value = false
+    }
+  },
+)
 
 // ---------------------------------------------------------------------------
 </script>
@@ -281,81 +418,76 @@ watch(hash, (newHash, oldHash) => {
         'references-classic': configuration.layout === 'classic',
       },
       $attrs.class,
-    ]"
-    :style="{
-      '--scalar-y-offset': `var(--scalar-custom-header-height, ${yPosition}px)`,
-    }">
+    ]">
     <!-- Header -->
     <div class="references-header">
       <MobileHeader
         v-if="configuration.layout === 'modern' && configuration.showSidebar"
-        :breadcrumb="referenceSlotProps.breadcrumb" />
+        :breadcrumb="referenceSlotProps.breadcrumb"
+        :isSidebarOpen="isSidebarOpen"
+        @toggleSidebar="() => (isSidebarOpen = !isSidebarOpen)" />
       <slot
         v-bind="referenceSlotProps"
         name="header" />
     </div>
     <!-- Navigation (sidebar) wrapper -->
-    <aside
-      v-if="configuration.showSidebar"
+
+    <ScalarSidebar
+      v-if="configuration.showSidebar && configuration.layout === 'modern'"
       :aria-label="`Sidebar for ${document?.info?.title}`"
-      class="references-navigation t-doc__sidebar">
-      <!-- Navigation tree / Table of Contents -->
-      <div class="references-navigation-list">
-        <ScalarErrorBoundary>
-          <!-- TODO: @brynn should this be conditional based on classic/modern layout? -->
-          <SidebarBlock
-            :options="{
-              pathRouting: configuration.pathRouting,
-              onSidebarClick: configuration.onSidebarClick,
-              operationTitleSource: configuration.operationTitleSource,
-              defaultOpenAllTags: configuration.defaultOpenAllTags,
-            }"
-            :title="document?.info?.title ?? 'The OpenAPI Schema'">
-            <template #sidebar-start>
-              <!-- Wrap in a div when slot is filled -->
-              <div v-if="$slots['document-selector']">
-                <slot name="document-selector" />
-              </div>
-              <!-- Search -->
-              <div
-                v-if="!configuration.hideSearch"
-                class="scalar-api-references-standalone-search">
-                <SearchButton
-                  :document="document"
-                  :hideModels="configuration?.hideModels"
-                  :searchHotKey="configuration?.searchHotKey" />
-              </div>
-              <!-- Sidebar Start -->
-              <slot
-                name="sidebar-start"
-                v-bind="referenceSlotProps" />
+      class="sidebar references-navigation t-doc__sidebar sticky top-0 h-dvh"
+      :isExpanded="sidebarState.isExpanded"
+      :isSelected="sidebarState.isSelected"
+      :items="sidebarItems"
+      layout="reference"
+      :options="{
+        operationTitleSource: configuration.operationTitleSource,
+      }"
+      @selectItem="(id) => handleSelectItem(id)">
+      <template #header>
+        <!-- Wrap in a div when slot is filled -->
+        <slot name="document-selector" />
+
+        <!-- Search -->
+        <div
+          v-if="!configuration.hideSearch"
+          class="scalar-api-references-standalone-search">
+          <SearchButton
+            :document="document"
+            :hideModels="configuration?.hideModels"
+            :items="sidebarItems"
+            :searchHotKey="configuration?.searchHotKey"
+            @toggleSidebarItem="(id) => handleSelectItem(id)" />
+        </div>
+        <!-- Sidebar Start -->
+        <slot
+          name="sidebar-start"
+          v-bind="referenceSlotProps" />
+      </template>
+      <template #footer>
+        <slot
+          v-bind="referenceSlotProps"
+          name="sidebar-end">
+          <ScalarSidebarFooter class="darklight-reference">
+            <OpenApiClientButton
+              v-if="!configuration.hideClientButton"
+              buttonSource="sidebar"
+              :integration="configuration._integration"
+              :isDevelopment="isDevelopment"
+              :url="url" />
+            <!-- Override the dark mode toggle slot to hide it -->
+            <template #toggle>
+              <ScalarColorModeToggleButton
+                v-if="!configuration.hideDarkModeToggle"
+                :modelValue="isDark"
+                @update:modelValue="$emit('toggleDarkMode')" />
+              <span v-else />
             </template>
-            <template #sidebar-end>
-              <slot
-                v-bind="referenceSlotProps"
-                name="sidebar-end">
-                <ScalarSidebarFooter class="darklight-reference">
-                  <OpenApiClientButton
-                    v-if="!configuration.hideClientButton"
-                    buttonSource="sidebar"
-                    :integration="configuration._integration"
-                    :isDevelopment="isDevelopment"
-                    :url="url" />
-                  <!-- Override the dark mode toggle slot to hide it -->
-                  <template #toggle>
-                    <ScalarColorModeToggleButton
-                      v-if="!configuration.hideDarkModeToggle"
-                      :modelValue="isDark"
-                      @update:modelValue="$emit('toggleDarkMode')" />
-                    <span v-else />
-                  </template>
-                </ScalarSidebarFooter>
-              </slot>
-            </template>
-          </SidebarBlock>
-        </ScalarErrorBoundary>
-      </div>
-    </aside>
+          </ScalarSidebarFooter>
+        </slot>
+      </template>
+    </ScalarSidebar>
+
     <!-- Slot for an Editor -->
     <div
       v-show="configuration.isEditable"
@@ -373,10 +505,15 @@ watch(hash, (newHash, oldHash) => {
       class="references-rendered">
       <Content
         :activeServer="activeServer"
-        :contentId="contentId"
         :document="document"
+        :expandedItems="sidebarState.expandedItems.value"
         :getSecuritySchemes="getSecuritySchemes"
+        :infoSectionId="infoSectionId ?? 'description/asd'"
+        :items="sidebarItems"
         :options="{
+          headingSlugGenerator:
+            configuration.generateHeadingSlug ??
+            ((heading) => `description/${heading.slug}`),
           slug: configuration.slug,
           hiddenClients: configuration.hiddenClients,
           layout: configuration.layout,
@@ -391,7 +528,12 @@ watch(hash, (newHash, oldHash) => {
           orderSchemaPropertiesBy: configuration.orderSchemaPropertiesBy,
           documentDownloadType: configuration.documentDownloadType,
         }"
-        :xScalarDefaultClient="xScalarDefaultClient">
+        :xScalarDefaultClient="xScalarDefaultClient"
+        @copyAnchorUrl="handleCopyAnchorUrl"
+        @intersecting="handleIntersecting"
+        @toggleOperation="handleToggleOperation"
+        @toggleSchema="handleToggleSchema"
+        @toggleTag="handleToggleTag">
         <template #start>
           <slot
             v-bind="referenceSlotProps"
@@ -406,7 +548,12 @@ watch(hash, (newHash, oldHash) => {
               v-if="!configuration.hideSearch"
               class="t-doc__sidebar max-w-64"
               :hideModels="configuration?.hideModels"
-              :searchHotKey="configuration.searchHotKey" />
+              :items="sidebarItems"
+              :searchHotKey="configuration.searchHotKey"
+              @toggleSidebarItem="
+                (id) =>
+                  sidebarState.setExpanded(id, !sidebarState.isExpanded(id))
+              " />
             <template #dark-mode-toggle>
               <ScalarColorModeToggleIcon
                 v-if="!configuration.hideDarkModeToggle"
@@ -418,6 +565,7 @@ watch(hash, (newHash, oldHash) => {
             </template>
           </ClassicHeader>
         </template>
+        <!-- TODO: Remove this; we no longer directly support an inline editor -->
         <template
           v-if="configuration?.isEditable"
           #empty-state>
@@ -461,7 +609,7 @@ watch(hash, (newHash, oldHash) => {
     --refs-sidebar-width: var(--scalar-sidebar-width, 0px);
     /* The header height */
     --refs-header-height: calc(
-      var(--scalar-y-offset) + var(--scalar-header-height, 0px)
+      var(--scalar-custom-header-height) + var(--scalar-header-height, 0px)
     );
     /* The offset of visible references content (minus headers) */
     --refs-viewport-offset: calc(
@@ -505,7 +653,7 @@ watch(hash, (newHash, oldHash) => {
   /* Grid layout */
   display: grid;
   grid-template-rows: var(--scalar-header-height, 0px) repeat(2, auto);
-  grid-template-columns: var(--refs-sidebar-width) 1fr;
+  grid-template-columns: auto 1fr;
   grid-template-areas:
     'header header'
     'navigation rendered'
